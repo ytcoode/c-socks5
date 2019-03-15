@@ -8,7 +8,7 @@ AM_INIT_AUTOMAKE([-Wall -Werror foreign])
 
 AC_PROG_CC
 
-dnl AC_CHECK_LIB([pthread], [pthread_mutex_init])
+AC_CHECK_LIB([pthread], [pthread_mutex_init])
 
 AC_CONFIG_FILES([Makefile])
 

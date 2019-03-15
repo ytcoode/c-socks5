@@ -85,7 +85,7 @@ int s5_listen(int port) {
 
 int s5_accept(int fd) { return accept(fd, NULL, NULL); }
 
-int s5_connect(int fd, int ip, int port) {
+int s5_connect(int fd, uint32_t ip, uint16_t port) {
   struct sockaddr_in addr;
 
   memset(&addr, 0, sizeof(addr));
@@ -96,7 +96,7 @@ int s5_connect(int fd, int ip, int port) {
   return connect(fd, (struct sockaddr *)&addr, sizeof(addr));
 }
 
-int s5_getsockname(int fd, int *ip, int *port) {
+int s5_getsockname(int fd, uint32_t *ip, uint16_t *port) {
   struct sockaddr_in addr;
   socklen_t addrlen = sizeof(addr);
   int err = getsockname(fd, (struct sockaddr *)&addr, &addrlen);
@@ -108,7 +108,7 @@ int s5_getsockname(int fd, int *ip, int *port) {
   return 0;
 }
 
-int s5_get_ip_by_domain(char *s, int *ip) {  // TODO async
+int s5_get_ip_by_domain(char *s, uint32_t *ip) {
   struct addrinfo hints, *res;
   struct sockaddr_in *addr;
   int err;
@@ -118,8 +118,6 @@ int s5_get_ip_by_domain(char *s, int *ip) {  // TODO async
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_TCP;
   hints.ai_flags = 0;
-
-  S5_DEBUG("s5_get_ip_by_domain: %s\n", s);
 
   err = getaddrinfo(s, NULL, &hints, &res);
   if (err) {

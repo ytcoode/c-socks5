@@ -3,7 +3,6 @@
 
 #include <assert.h>
 #include <errno.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -22,6 +21,5 @@
 
 void s5_close(int fd);
 int s5_fcntl_set_nonblock(int fd);
-int signal_ignore(int signum);
 
 #endif

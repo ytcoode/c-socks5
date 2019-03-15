@@ -2,6 +2,7 @@
 AM_CFLAGS = -pedantic -Wall -Werror # -std=c11 # TODO
 
 SHARED_SRCS = \
+  s5_type.h \
   s5_server.c \
   s5_server.h \
   s5_conn.c \
@@ -12,6 +13,10 @@ SHARED_SRCS = \
   s5_conn_relay.h \
   s5_conn_shutdown.c \
   s5_conn_shutdown.h \
+  s5_dns_resolver.c \
+  s5_dns_resolver.h \
+  s5_signal.c \
+  s5_signal.h \
   s5_util.h \
   s5_util_epoll.c \
   s5_util_epoll.h \

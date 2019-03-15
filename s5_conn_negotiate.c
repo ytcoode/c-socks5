@@ -1,31 +1,34 @@
 #include "s5_conn_negotiate.h"
 #include <string.h>
+#include "s5_conn.h"
 #include "s5_conn_relay.h"
+#include "s5_dns_resolver.h"
+#include "s5_server.h"
 
-#define DOMAIN_LEN 256
-static char domain[DOMAIN_LEN];
-
-bool h_select_method_req(void *p, s5_epoll_t *ep) {
+void h_select_method_req(void *p, s5_epoll_t *ep) {
   s5_conn_t *c = p;
-  bool b;
   int n, val;
 
-restart:
+read:
   n = s5_buf_read(c->buf, c->fd);
   if (n == 0) {
-    return true;
+  close:
+    s5_conn_destroy(c, ep);
+    return;
   }
 
   if (n == -1) {
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return false;
+      return;
     }
     if (errno == EINTR) {
-      goto restart;
+      goto read;
     }
     perror("s5_buf_read");
-    return true;
+    goto close;
   }
+
+  assert(n > 0);
 
   /*
 
@@ -37,32 +40,31 @@ restart:
 
   */
 
-  b = s5_buf_get_byte(c->buf, &val, 1);
-  if (!b || s5_buf_readable_bytes(c->buf) < val + 2) {
-    goto restart;
+  n = s5_buf_readable_bytes(c->buf);
+  if (n < 2) {
+    goto read;
   }
 
-  b = s5_buf_read_byte(c->buf, &val);
-  assert(b);
+  val = s5_buf_get_int8(c->buf, 1);
+  if (n < val + 2) {
+    goto read;
+  }
 
+  val = s5_buf_read_int8(c->buf);
   if (val != 5) {  // socks version 5
-    printf("illegal version: %d\n", val);
-    return true;
+    printf("illegal socks version: %d\n", val);
+    goto close;
   }
 
-  b = s5_buf_read_byte(c->buf, &val);
-  assert(b);
-
+  val = s5_buf_read_int8(c->buf);
   if (val < 1 || val > 255) {  // nmethods
     printf("illegal nmethods: %d\n", val);
-    return true;
+    goto close;
   }
 
   for (int i = 0; i < val; i++) {
-    int m;
-    b = s5_buf_read_byte(c->buf, &m);
-    assert(b);
-    // TODO
+    s5_buf_read_int8(c->buf);
+    // TODO method
   }
 
   /*
@@ -75,45 +77,43 @@ restart:
 
   */
 
-  b = s5_buf_write_byte(c->peer->buf, 5);  // version
-  assert(b);
+  s5_buf_write_int8(c->peer->buf, 5);  // version
+  s5_buf_write_int8(c->peer->buf, 0);  // NO AUTHENTICATION REQUIRED // TODO
 
-  b = s5_buf_write_byte(c->peer->buf, 0);  // NO AUTHENTICATION REQUIRED // TODO
-  assert(b);
-
-  s5_epoll_item_set_hdlr(p, NULL, h_select_method_reply, "select_method_reply");
-  return h_select_method_reply(p, ep);
+  S5_EPOLL_ITEM_SET_STATE(c, SELECT_METHOD_REPLY);
+  h_select_method_reply(p, ep);
 }
 
-bool h_select_method_reply(void *p, s5_epoll_t *ep) {
+void h_select_method_reply(void *p, s5_epoll_t *ep) {
   s5_conn_t *c = p;
   int n;
 
-restart:
+write:
   n = s5_buf_write(c->peer->buf, c->fd);
   if (n == -1) {
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return false;
+      return;
     }
     if (errno == EINTR) {
-      goto restart;
+      goto write;
     }
     perror("s5_buf_write");
-    return true;
+    s5_conn_destroy(c, ep);
+    return;
   }
 
   if (s5_buf_readable_bytes(c->peer->buf) > 0) {
-    goto restart;
+    goto write;
   }
 
-  s5_epoll_item_set_hdlr(p, h_connect_req, NULL, "connect_req");
-  return h_connect_req(p, ep);
+  S5_EPOLL_ITEM_SET_STATE(c, CONNECT_REQ);
+  h_connect_req(c, ep);
 }
 
-bool h_connect_req(void *p, s5_epoll_t *ep) {
+void h_connect_req(void *p, s5_epoll_t *ep) {
   s5_conn_t *c = p;
-  bool b;
-  int n, val, atyp, ip, port;
+  int n, val, atyp, rbytes;
+  uint32_t ip;
 
   /*
 
@@ -126,20 +126,21 @@ bool h_connect_req(void *p, s5_epoll_t *ep) {
   */
 
 restart:
-  b = s5_buf_get_byte(c->buf, &atyp, 3);
-  if (!b) {
+  rbytes = s5_buf_readable_bytes(c->buf);
+  if (rbytes < 4) {
     goto read;
   }
 
+  atyp = s5_buf_get_int8(c->buf, 3);
   switch (atyp) {
     case 1:  // ipv4
       n = 10;
       break;
     case 3:  // domain name
-      b = s5_buf_get_byte(c->buf, &val, 4);
-      if (!b) {
+      if (rbytes < 5) {
         goto read;
       }
+      val = s5_buf_get_int8(c->buf, 4);
       n = 7 + val;
       break;
     case 4:  // ipv6
@@ -147,59 +148,75 @@ restart:
       break;
     default:
       printf("illegal atyp: %d\n", atyp);
-      return true;
+      goto close;
   }
 
-  if (s5_buf_readable_bytes(c->buf) < n) {
+  if (rbytes < n) {
     goto read;
   }
 
-  b = s5_buf_read_byte(c->buf, &val);
-  assert(b);
+  val = s5_buf_read_int8(c->buf);
   if (val != 5) {  // VER
-    return true;
+    goto close;    // TODO err handling
   }
 
-  b = s5_buf_read_byte(c->buf, &val);
-  assert(b);
+  val = s5_buf_read_int8(c->buf);
   if (val != 1) {  // CMD
     printf("illegal cmd: %d\n", val);
-    return true;
+    goto close;
   }
 
-  b = s5_buf_read_byte(c->buf, &val);
-  assert(b);
+  val = s5_buf_read_int8(c->buf);
   if (val != 0) {  // RSV
-    return true;
+    goto close;
   }
 
-  b = s5_buf_read_byte(c->buf, &val);
-  assert(b);
+  s5_buf_skip_bytes(c->buf, 1);  // atyp
 
-  if (val == 1) {
-    b = s5_buf_read_int(c->buf, &ip);
-    assert(b);
-  } else if (val == 3) {
-    b = s5_buf_read_byte(c->buf, &n);
-    assert(b);
-    assert(n < DOMAIN_LEN);
+  if (atyp == 1) {  // ipv4
+    ip = s5_buf_read_int32(c->buf);
+    s5_connect_target(c, ip, ep);
+    return;
+  }
 
-    b = s5_buf_read_bytes(c->buf, domain, n);
-    assert(b);
-    domain[n] = 0;
-
-    n = s5_get_ip_by_domain(domain, &ip);
-    if (n) {
-      return true;
+  if (atyp == 3) {  // domain name
+    S5_EPOLL_ITEM_SET_STATE(c, RESOLVE_DOMAIN_NAME);
+    if (s5_dn2ip_write_req_or_link(c->s, c)) {
+      goto close;
     }
-  } else {
-    assert(val == 4);
-    S5_ERROR("ipv6 not support\n");
-    return true;
+    return;
   }
 
-  b = s5_buf_read_short(c->buf, &port);
-  assert(b);
+  // ipv6
+  assert(atyp == 4);
+  S5_ERROR("ipv6 not support\n");
+  goto close;
+
+read:
+  n = s5_buf_read(c->buf, c->fd);
+  if (n > 0) {
+    goto restart;
+  }
+
+  if (n == -1) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return;
+    }
+    if (errno == EINTR) {
+      goto read;
+    }
+    perror("s5_buf_read");
+  }
+
+close:
+  s5_conn_destroy(c, ep);
+}
+
+void s5_connect_target(s5_conn_t *c, uint32_t ip, s5_epoll_t *ep) {
+  int err;
+  uint16_t port;
+
+  port = s5_buf_read_int16(c->buf);
 
   int ipb1 = (ip >> 24) & 0xff;  // TODO
   int ipb2 = (ip >> 16) & 0xff;
@@ -211,56 +228,40 @@ restart:
   c->peer->fd = s5_tcp_nonblocking_socket();
   if (c->peer->fd == -1) {
     perror("s5_tcp_nonblocking_socket");
-    return true;
+    goto close;
   }
 
-  val = s5_connect(c->peer->fd, ip, port);
-  if (val == -1 && errno != EINPROGRESS) {
+  err = s5_connect(c->peer->fd, ip, port);
+  if (err && errno != EINPROGRESS) {
     perror("s5_connect");
-    return true;
+    goto close;
   }
 
-  s5_epoll_item_null_hdlr(c);
-  s5_epoll_item_set_hdlr(c->peer, NULL, h_connect_target, "connect_target");
+  S5_EPOLL_ITEM_SET_STATE(c->peer, CONNECT_TARGET);
 
-  val = s5_epoll_add(ep, c->peer->fd, c->peer);
-  if (val == -1) {
+  err = s5_epoll_add(ep, c->peer->fd, c->peer);
+  if (err) {
     perror("s5_epoll_add");
-    return true;
+    goto close;
   }
-  return false;
+  return;
 
-read:
-  n = s5_buf_read(c->buf, c->fd);
-  if (n > 0) {
-    goto restart;
-  }
-
-  if (n == -1) {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return false;
-    }
-    if (errno == EINTR) {
-      goto read;
-    }
-    perror("s5_buf_read");
-  }
-
-  return true;
+close:
+  s5_conn_destroy(c->peer, ep);
 }
 
-bool h_connect_target(void *p, s5_epoll_t *ep) {
+void h_target_connected(void *p, s5_epoll_t *ep) {
   s5_conn_t *c = p;
   int val;
 
   if (s5_getsockopt_so_error(c->fd, &val)) {
     perror("s5_getsockopt_so_error");
-    return true;
+    goto close;
   }
 
   if (val != 0) {
     printf("connect_target SO_ERROR: %s\n", strerror(val));
-    return true;  // TODO tell client the error
+    goto close;  // TODO tell client the error
   }
 
   /*
@@ -273,40 +274,23 @@ bool h_connect_target(void *p, s5_epoll_t *ep) {
 
   */
 
-  if (!s5_buf_write_byte(c->buf, 5)) {
-    return true;  // TODO shoud not happen
+  s5_buf_write_int8(c->buf, 5);
+  s5_buf_write_int8(c->buf, 0);
+  s5_buf_write_int8(c->buf, 0);
+  s5_buf_write_int8(c->buf, 1);
+  s5_buf_write_int32(c->buf, 0);  // TODO ip
+  s5_buf_write_int16(c->buf, 0);  // TODO port
+
+  S5_EPOLL_ITEM_SET_STATE(c, RELAY);
+  S5_EPOLL_ITEM_SET_STATE(c->peer, RELAY);
+
+  h_relay_in(c->peer, ep);
+
+  if (s5_epoll_item_is_state(c, RELAY)) {
+    h_relay_in(c, ep);
   }
+  return;
 
-  if (!s5_buf_write_byte(c->buf, 0)) {
-    return true;
-  }
-
-  if (!s5_buf_write_byte(c->buf, 0)) {
-    return true;
-  }
-
-  if (!s5_buf_write_byte(c->buf, 1)) {
-    return true;
-  }
-
-  if (!s5_buf_write_int(c->buf, 0)) {  // TODO ip
-    return true;
-  }
-
-  if (!s5_buf_write_short(c->buf, 0)) {  // TODO port
-    return true;
-  }
-
-  s5_epoll_item_set_hdlr(c, h_relay_in, h_relay_out, "relay");
-  s5_epoll_item_set_hdlr(c->peer, h_relay_in, h_relay_out, "relay");
-
-  if (h_relay_in(c, ep)) {
-    return true;
-  }
-
-  if (h_relay_in(c->peer, ep)) {
-    return true;
-  }
-
-  return false;
+close:
+  s5_conn_destroy(c, ep);
 }
